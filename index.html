@@ -1064,6 +1064,10 @@
               <input id="profitTarget" type="number" min="0" step="100">
             </div>
             <div>
+              <label for="targetDays">Target days</label>
+              <input id="targetDays" type="number" min="1" step="1">
+            </div>
+            <div>
               <label for="maxLoss">Max loss</label>
               <input id="maxLoss" type="number" min="1" step="100">
             </div>
@@ -1123,12 +1127,8 @@
             <div class="details-body">
               <div class="grid">
                 <div>
-                  <label for="minDays">Min days</label>
+                  <label for="minDays">Min qualifying days</label>
                   <input id="minDays" type="number" min="1" step="1">
-                </div>
-                <div>
-                  <label for="maxDays">Max days</label>
-                  <input id="maxDays" type="number" min="1" step="1">
                 </div>
                 <div>
                   <label for="maxTrades">Max trades</label>
@@ -1278,7 +1278,7 @@
           maxLoss: 1000,
           drawdownType: "trailing-eod",
           minDays: 5,
-          maxDays: 30,
+          targetDays: 30,
           winRate: 50,
           riskPerTrade: 100,
           rewardRisk: 2,
@@ -1301,7 +1301,7 @@
           maxLoss: 2000,
           drawdownType: "trailing-eod",
           minDays: 5,
-          maxDays: 30,
+          targetDays: 30,
           winRate: 50,
           riskPerTrade: 100,
           rewardRisk: 2,
@@ -1324,7 +1324,7 @@
           maxLoss: 3000,
           drawdownType: "trailing-eod",
           minDays: 5,
-          maxDays: 30,
+          targetDays: 30,
           winRate: 50,
           riskPerTrade: 100,
           rewardRisk: 2,
@@ -1347,7 +1347,7 @@
           maxLoss: 4500,
           drawdownType: "trailing-eod",
           minDays: 5,
-          maxDays: 30,
+          targetDays: 30,
           winRate: 50,
           riskPerTrade: 100,
           rewardRisk: 2,
@@ -1368,7 +1368,7 @@
       "maxLoss",
       "drawdownType",
       "minDays",
-      "maxDays",
+      "targetDays",
       "winRate",
       "riskPerTrade",
       "rewardRisk",
@@ -1484,6 +1484,7 @@
         migrated.commissionFees = migrated.costPerTrade;
       }
       if (migrated.slippageTicks === undefined) migrated.slippageTicks = 0;
+      if (migrated.targetDays === undefined && migrated.maxDays !== undefined) migrated.targetDays = migrated.maxDays;
       const merged = { ...defaults(), ...migrated };
       fields.forEach((id) => input[id].value = merged[id]);
       ui.winRateText.textContent = `${merged.winRate}%`;
@@ -1506,7 +1507,7 @@
       });
       out.winRate = clamp(out.winRate, 1, 99);
       out.minDays = Math.max(1, Math.round(out.minDays || 1));
-      out.maxDays = Math.max(out.minDays, Math.round(out.maxDays || out.minDays));
+      out.targetDays = Math.max(out.minDays, Math.round(out.targetDays || out.minDays));
       out.tradesPerDay = Math.max(1, Math.round(out.tradesPerDay || 1));
       out.slippageTicks = Math.max(0, Math.round(Number(out.slippageTicks) || 0));
       out.commissionFees = Math.max(0, Number(out.commissionFees) || 0);
@@ -1558,9 +1559,38 @@
       return 1 - Math.pow(1 - Math.pow(lossRate, length), windows);
     }
 
-    function simulatePath(v, winRate, includePath) {
+    function seedFor(v, winRate, index) {
+      const parts = [
+        winRate,
+        v.riskPerTrade,
+        v.rewardRisk,
+        v.tradesPerDay,
+        v.slippageTicks,
+        v.commissionFees,
+        index
+      ].join("|");
+      let hash = 2166136261;
+      for (let i = 0; i < parts.length; i++) {
+        hash ^= parts.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      return hash >>> 0;
+    }
+
+    function seededRandom(seed) {
+      let state = seed >>> 0;
+      return () => {
+        state += 0x6D2B79F5;
+        let next = state;
+        next = Math.imul(next ^ (next >>> 15), next | 1);
+        next ^= next + Math.imul(next ^ (next >>> 7), next | 61);
+        return ((next ^ (next >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    function simulatePath(v, winRate, includePath, rng) {
       const m = math(v, winRate);
-      const dailyLimit = v.maxDays * v.tradesPerDay;
+      const dailyLimit = v.targetDays * v.tradesPerDay;
       const tradeLimit = v.maxTrades > 0 ? Math.min(v.maxTrades, dailyLimit) : dailyLimit;
       let pnl = 0;
       let maxPnl = 0;
@@ -1576,7 +1606,7 @@
           currentDay = day;
         }
 
-        pnl += Math.random() < m.p ? m.win : m.loss;
+        pnl += rng() < m.p ? m.win : m.loss;
         maxPnl = Math.max(maxPnl, pnl);
         maxDrawdown = Math.max(maxDrawdown, maxPnl - pnl);
         if (path) path.push({ trade, day, pnl });
@@ -1588,7 +1618,7 @@
         if (pnl >= v.profitTarget && day >= v.minDays) return { outcome: "pass", pnl, trade, day, maxDrawdown, path };
       }
 
-      const finalDay = Math.min(v.maxDays, Math.ceil(tradeLimit / v.tradesPerDay));
+      const finalDay = Math.min(v.targetDays, Math.ceil(tradeLimit / v.tradesPerDay));
       return {
         outcome: pnl >= v.profitTarget && finalDay >= v.minDays ? "pass" : "expired",
         pnl,
@@ -1607,7 +1637,7 @@
       const passTrades = [];
       const paths = [];
       for (let i = 0; i < runs; i++) {
-        const result = simulatePath(v, winRate, paths.length < pathCount);
+        const result = simulatePath(v, winRate, paths.length < pathCount, seededRandom(seedFor(v, winRate, i)));
         counts[result.outcome]++;
         finals.push(result.pnl);
         drawdowns.push(result.maxDrawdown);
@@ -1721,6 +1751,8 @@
     function render() {
       const v = values();
       ui.winRateText.textContent = `${v.winRate}%`;
+      input.targetDays.value = v.targetDays;
+      input.minDays.value = v.minDays;
       updateWinRateSlider(v.winRate);
       const selected = run(v, v.winRate, v.runs, 30);
       const rows = sweep(v);
@@ -1734,35 +1766,27 @@
 
     function renderMetrics(v, selected, m) {
       const goalWord = "target";
-      const totalTrades = v.maxTrades > 0 ? v.maxTrades : v.maxDays * v.tradesPerDay;
-      const streakLength = Math.max(2, Math.ceil(v.maxLoss / Math.max(1, v.riskPerTrade)));
-      const streak = streakRisk(1 - m.p, totalTrades, streakLength);
-      const dailyEv = m.ev * v.tradesPerDay;
-      const evDays = dailyEv > 0 ? Math.max(v.minDays, Math.ceil(v.profitTarget / dailyEv)) : Infinity;
-      const medianDays = selected.counts.pass > 0 ? Math.max(1, Math.round(selected.medianPassDays)) : Infinity;
       ui.targetLabel.textContent = "Target";
       ui.passMetricLabel.textContent = "Target probability";
       ui.passRate.textContent = pct(selected.passRate);
       ui.failRate.textContent = pct(selected.failRate);
       ui.evTrade.textContent = money(m.ev, true);
-      ui.passNote.textContent = `${selected.counts.pass.toLocaleString()} of ${selected.runs.toLocaleString()} ${goalWord}-first paths`;
+      ui.passNote.textContent = `Within ${dayText(v.targetDays)}`;
       ui.failNote.textContent = `${selected.counts.fail.toLocaleString()} drawdown-first`;
       ui.passBar.style.width = `${selected.passRate * 100}%`;
       ui.failBar.style.width = `${selected.failRate * 100}%`;
       ui.expiredBar.style.width = `${selected.expiredRate * 100}%`;
-      ui.passBar.parentElement.title = `${pct(selected.passRate)} ${goalWord}, ${pct(selected.failRate)} ruin, ${pct(selected.expiredRate)} expired`;
-      ui.plainInsight.textContent = Number.isFinite(medianDays)
-        ? `${pct(selected.passRate)} chance to reach the target in about ${dayText(medianDays)}.`
-        : `${pct(selected.passRate)} chance to reach the target; no reliable time estimate.`;
+      ui.passBar.parentElement.title = `${selected.counts.pass.toLocaleString()} of ${selected.runs.toLocaleString()} ${goalWord}-first paths, ${pct(selected.failRate)} ruin, ${pct(selected.expiredRate)} expired`;
+      ui.plainInsight.textContent = `${pct(selected.passRate)} chance to reach ${money(v.profitTarget)} within ${dayText(v.targetDays)}.`;
     }
 
     function renderTables(v, selected, rows, m) {
-      const totalTrades = v.maxTrades > 0 ? v.maxTrades : v.maxDays * v.tradesPerDay;
+      const totalTrades = v.maxTrades > 0 ? v.maxTrades : v.targetDays * v.tradesPerDay;
       const streakLength = Math.max(2, Math.ceil(v.maxLoss / Math.max(1, v.riskPerTrade)));
       const streak = streakRisk(1 - m.p, totalTrades, streakLength);
       const dailyEv = m.ev * v.tradesPerDay;
       const evDays = dailyEv > 0 ? Math.max(v.minDays, Math.ceil(v.profitTarget / dailyEv)) : Infinity;
-      const timeLabel = "Median time to target";
+      const timeLabel = "Median time among hits";
       const timeValue = selected.counts.pass > 0 ? `${Math.max(1, Math.round(selected.medianPassDays))} days` : "No hit";
       const rangeValue = selected.counts.pass > 0
         ? `${Math.max(1, Math.round(selected.p25PassDays))}-${Math.max(1, Math.round(selected.p75PassDays))} days`
@@ -1771,6 +1795,7 @@
       renderSensitivityHeatmap(v, rows);
 
       ui.summaryBody.innerHTML = [
+        ["Target window", dayText(v.targetDays), "Deadline used for the simulation"],
         [timeLabel, timeValue, "Middle successful path"],
         ["Time range", rangeValue, "25th to 75th percentile"],
         ["EV pace", Number.isFinite(evDays) ? `${evDays} days` : "Not viable", "Target divided by expected daily EV"],
@@ -2052,7 +2077,7 @@
           isCurrent: multiple === 1,
           passRate: sim.passRate,
           failRate: sim.failRate,
-          days: sim.counts.pass > 0 ? Math.max(1, sim.medianPassDays) : last.v.maxDays + 5
+          days: sim.counts.pass > 0 ? Math.max(1, sim.medianPassDays) : last.v.targetDays + 5
         };
       });
       const minDays = Math.max(1, Math.floor(Math.min(...points.map((point) => point.days))) - 1);
@@ -2153,7 +2178,7 @@
       const all = paths.flatMap((path) => path.map((point) => point.pnl));
       const yMin = Math.min(...all, -last.v.maxLoss * 1.1);
       const yMax = Math.max(...all, last.v.profitTarget * 1.08);
-      const maxTrade = Math.max(...paths.flatMap((path) => path.map((point) => point.trade)), last.v.maxDays * last.v.tradesPerDay);
+      const maxTrade = Math.max(...paths.flatMap((path) => path.map((point) => point.trade)), last.v.targetDays * last.v.tradesPerDay);
       const maxX = maxTrade;
       const zeroY = sy(0, yMin, yMax, area.bottom, area.top);
       ctx.strokeStyle = colors.grid;
