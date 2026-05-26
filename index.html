@@ -715,6 +715,19 @@
       transform: translate(-50%, 0);
     }
 
+    .disclaimer {
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 0.76rem;
+      line-height: 1.5;
+      text-align: center;
+    }
+
+    .disclaimer strong {
+      color: var(--ink);
+      font-weight: 800;
+    }
+
     @media (max-width: 980px) {
       .top,
       .layout,
@@ -1242,6 +1255,11 @@
         </div>
       </section>
     </div>
+
+    <p class="disclaimer">
+      <strong>Not financial advice.</strong> This calculator is for educational planning and risk modeling only.
+      Trading futures and prop-firm accounts involves substantial risk, and results are never guaranteed.
+    </p>
   </main>
 
   <div class="toast" id="toast"></div>
